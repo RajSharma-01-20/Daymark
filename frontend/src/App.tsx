@@ -12,7 +12,9 @@ type Project = { id: number; name: string; color: string };
 type Settings = { theme: 'light' | 'dark'; density: 'comfortable' | 'compact'; startView: Exclude<View, 'completed'>; dateFormat: 'friendly' | 'numeric' };
 
 const defaultSettings: Settings = { theme: 'light', density: 'comfortable', startView: 'today', dateFormat: 'friendly' };
-const localToday = () => { const now = new Date(); return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10); };
+const localDate = (offset = 0) => { const now = new Date(); now.setDate(now.getDate() + offset); return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10); };
+const localToday = () => localDate();
+const localTomorrow = () => localDate(1);
 const viewItems: { id: View; label: string; icon: string }[] = [
   { id: 'today', label: 'Today', icon: '◷' },
   { id: 'inbox', label: 'Inbox', icon: '⌑' },
@@ -61,6 +63,7 @@ function Daymark() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [search, setSearch] = useState('');
+  const [dailyDate, setDailyDate] = useState(localToday);
   const [priorityFilter, setPriorityFilter] = useState<number | ''>('');
   const [activeProject, setActiveProject] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -91,15 +94,18 @@ function Daymark() {
     if (!csrf) return;
     setPageLoading(true);
     try {
-      const params = new URLSearchParams({ view: activeView, q: search });
-      params.set('today', localToday());
+      const isDailyView = activeView === 'today' && activeProject === null;
+      const selectedDay = isDailyView ? dailyDate : localToday();
+      const isTomorrow = isDailyView && selectedDay === localTomorrow();
+      const params = new URLSearchParams({ view: isTomorrow ? 'all' : activeView, q: search });
+      params.set('today', selectedDay);
       if (priorityFilter !== '') params.set('priority', String(priorityFilter));
       if (activeProject !== null) params.set('project_id', String(activeProject));
       const result = await api<Task[]>(`/api/tasks?${params}`, csrf);
-      setTasks(result);
+      setTasks(isTomorrow ? result.filter(task => task.start_date === selectedDay || task.due_date === selectedDay) : result);
     } catch (error) { flash(error instanceof Error ? error.message : 'Could not load tasks.'); }
     finally { setPageLoading(false); }
-  }, [activeView, activeProject, csrf, priorityFilter, search]);
+  }, [activeView, activeProject, csrf, dailyDate, priorityFilter, search]);
 
   useEffect(() => {
     api<{ csrf_token: string }>('/api/me', '')
@@ -132,15 +138,15 @@ function Daymark() {
     return () => window.removeEventListener('keydown', shortcuts);
   }, []);
 
-  const viewTitle = activeProject !== null ? projects.find(project => project.id === activeProject)?.name ?? 'Project' : viewItems.find(view => view.id === activeView)?.label ?? 'Today';
+  const viewTitle = activeProject !== null ? projects.find(project => project.id === activeProject)?.name ?? 'Project' : activeView === 'today' && dailyDate === localTomorrow() ? 'Tomorrow' : viewItems.find(view => view.id === activeView)?.label ?? 'Today';
   const subtitle = useMemo(() => {
     if (activeProject !== null) return 'A little progress adds up.';
-    if (activeView === 'today') return new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date());
+    if (activeView === 'today') return new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date(`${dailyDate}T12:00:00`));
     if (activeView === 'inbox') return 'A quiet place to collect things before you plan them.';
     if (activeView === 'upcoming') return 'See what is waiting around the corner.';
     if (activeView === 'completed') return 'Look at everything you have already moved forward.';
     return 'Everything you are carrying, in one place.';
-  }, [activeProject, activeView]);
+  }, [activeProject, activeView, dailyDate]);
 
   async function refresh(token = csrf) {
     if (!token) return;
@@ -150,12 +156,13 @@ function Daymark() {
   async function quickAdd(event: FormEvent) {
     event.preventDefault();
     if (!quickTitle.trim()) return;
+    const addToDailyList = activeView === 'today' && activeProject === null;
     setBusy(true);
     try {
-      await api<Task>('/api/tasks', csrf, { method: 'POST', body: JSON.stringify({ title: quickTitle.trim() }) });
+      await api<Task>('/api/tasks', csrf, { method: 'POST', body: JSON.stringify({ title: quickTitle.trim(), ...(addToDailyList ? { due_date: dailyDate } : {}) }) });
       setQuickTitle('');
       await refresh();
-      flash('Task added to your inbox.');
+      flash(addToDailyList ? `Added to ${dailyDate === localToday() ? 'today' : 'tomorrow'}’s list.` : 'Task added to your inbox.');
     } catch (error) { flash(error instanceof Error ? error.message : 'Could not add task.'); }
     finally { setBusy(false); }
   }
@@ -226,7 +233,7 @@ function Daymark() {
         <header className="app-header"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => document.body.classList.add('nav-open')}>☰</button><div className="breadcrumb"><span>MY DAYMARK</span><b>/</b><strong>{viewTitle}</strong></div><div className="header-actions"><label className="search-box"><span>⌕</span><input ref={searchRef} aria-label="Search tasks" placeholder="Search tasks…" value={search} onChange={event => setSearch(event.target.value)} /><kbd>⌘ K</kbd></label><button className="icon-button settings-mobile" aria-label="Preferences" onClick={() => setSettingsOpen(true)}>⚙</button></div></header>
         <section className="content-area">
           <div className="view-heading"><div><p className="view-eyebrow">{activeView === 'today' && activeProject === null ? 'A FRESH PAGE' : 'YOUR TASKS'}</p><h1>{viewTitle}<span className="title-count">{tasks.length}</span></h1><p className="view-subtitle">{subtitle}</p></div><button className="primary-button add-task-top" onClick={() => { setEditing(null); setEditorOpen(true); }}>＋ <span>Add task</span></button></div>
-          <form className="quick-add" onSubmit={quickAdd}><span className="quick-plus">＋</span><input ref={quickAddRef} value={quickTitle} onChange={event => setQuickTitle(event.target.value)} placeholder="Add a task to your inbox…" aria-label="Quick add task" /><button disabled={busy || !quickTitle.trim()} type="submit">Add task <span>↵</span></button></form>
+          {activeView === 'today' && activeProject === null ? <div className="daily-todo-panel"><div className="daily-todo-heading"><span className="daily-todo-check">✓</span><div><h2>{dailyDate === localToday() ? 'Today’s to-dos' : 'Tomorrow’s to-dos'}</h2><p>Write down anything you want to get done {dailyDate === localToday() ? 'today' : 'tomorrow'}.</p></div><div className="daily-day-switch" role="group" aria-label="Choose which day to plan"><button type="button" className={dailyDate === localToday() ? 'selected' : ''} aria-pressed={dailyDate === localToday()} onClick={() => setDailyDate(localToday())}>Today</button><button type="button" className={dailyDate === localTomorrow() ? 'selected' : ''} aria-pressed={dailyDate === localTomorrow()} onClick={() => setDailyDate(localTomorrow())}>Tomorrow</button></div></div><form className="quick-add" onSubmit={quickAdd}><span className="quick-plus">＋</span><input ref={quickAddRef} value={quickTitle} onChange={event => setQuickTitle(event.target.value)} placeholder={`What do you want to get done ${dailyDate === localToday() ? 'today' : 'tomorrow'}?`} aria-label={`Add a todo for ${dailyDate === localToday() ? 'today' : 'tomorrow'}`} /><button disabled={busy || !quickTitle.trim()} type="submit">Add to {dailyDate === localToday() ? 'today' : 'tomorrow'} <span>↵</span></button></form></div> : <form className="quick-add" onSubmit={quickAdd}><span className="quick-plus">＋</span><input ref={quickAddRef} value={quickTitle} onChange={event => setQuickTitle(event.target.value)} placeholder="Add a task to your inbox…" aria-label="Quick add task" /><button disabled={busy || !quickTitle.trim()} type="submit">Add task <span>↵</span></button></form>}
           <div className="list-toolbar"><div className="list-context"><span className="context-dot" /> {activeView === 'completed' ? 'A record of your progress' : 'Keep it simple. Start anywhere.'}</div><div className="filters"><label className="filter-select"><span>Priority</span><select aria-label="Filter by priority" value={priorityFilter} onChange={event => setPriorityFilter(event.target.value === '' ? '' : Number(event.target.value))}><option value="">Any</option>{priorities.slice(1).map((label, index) => <option key={label} value={index + 1}>{label}</option>)}</select></label><button className={`filter-clear ${priorityFilter !== '' ? 'visible' : ''}`} onClick={() => setPriorityFilter('')}>Clear</button></div></div>
           <div className="task-list" aria-live="polite">
             {pageLoading ? <div className="list-state"><span className="loader"/>Gathering your tasks…</div> : tasks.length ? tasks.map(task => <article className={`task-row ${task.completed ? 'is-complete' : ''}`} key={task.id}>
